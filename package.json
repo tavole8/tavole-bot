@@ -1,0 +1,18 @@
+{
+  "name": "tavole-bot",
+  "version": "2.0.0",
+  "description": "Tavole — AI WhatsApp concierge bot powered by Claude + Twilio WhatsApp API",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "twilio": "^5.5.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "skills": [
+    {
+      "id": "meta-whatsapp-setup",
+      "name": "Meta WhatsApp Cloud API Setup",
+      "description": "How to set up a WhatsApp bot using Meta Cloud API with a prepaid SIM chip",
+      "keywords": ["whatsapp", "bot", "meta", "cloud api", "chip", "setup", "configurar", "whatsapp business"],
+      "file": "meta-whatsapp-setup.md",
+      "estimatedTime": "30 minutes",
+      "estimatedCost": "$79 MXN (SIM chip) + free API",
+      "tier": "standard"
+    }
+  ]
+}
