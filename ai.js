@@ -4,6 +4,7 @@ import { findRelevantSkills, formatSkillContext } from './skills.js';
 import { buildMemoryContext } from './memory.js';
 import { getBalance, formatBalanceSummary, formatCreditPackages, formatTransactionHistory } from './credits.js';
 import { searchWeb } from './web-search.js';
+import { detectTracking, trackPackage } from './tracking.js';
 import log from './logger.js';
 
 // Models
@@ -362,6 +363,23 @@ export async function chat(userPhone, userName, userMessage, options = {}) {
   let result = await callAI(model, systemPrompt, messages, maxTokens);
   let totalInputTokens = result.inputTokens;
   let totalOutputTokens = result.outputTokens;
+
+  // Check if AI wants to search — but first, detect tracking numbers
+  const trackingDetected = detectTracking(result.text.replace(/^\[SEARCH:\s*.+?\]\s*/i, '')) || detectTracking(userMessage);
+  if (trackingDetected) {
+    log.info('tracking_detected', { phone: userPhone, carrier: trackingDetected.carrier, number: trackingDetected.trackingNumber });
+    const trackResult = await trackPackage(trackingDetected.trackingNumber, trackingDetected.carrier);
+    
+    messages.push({ role: 'assistant', content: result.text });
+    messages.push({ role: 'user', content: trackResult.formatted + '\n\nUsa esta informacion para responder al usuario sobre su paquete. Se claro y conciso.' });
+
+    result = await callAI(model, systemPrompt, messages, maxTokens);
+    totalInputTokens += result.inputTokens;
+    totalOutputTokens += result.outputTokens;
+
+    messages.pop();
+    messages.pop();
+  }
 
   // Check if AI wants to search the web
   const searchMatch = result.text.match(/^\[SEARCH:\s*(.+?)\]\s*/i);
