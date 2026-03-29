@@ -9,77 +9,121 @@ export function detectTracking(text) {
   if (!text) return null;
   const clean = text.replace(/\s+/g, ' ').trim();
 
-  // FedEx: 12-22 digits
-  const fedexMatch = clean.match(/\b(\d{12,22})\b/);
-  if (fedexMatch) {
-    const num = fedexMatch[1];
-    // FedEx tracking numbers are typically 12, 15, 20, or 22 digits
-    if ([12, 15, 20, 22].includes(num.length) || num.length >= 12) {
-      return { carrier: 'fedex', trackingNumber: num };
-    }
-  }
-
-  // DHL: 10-digit or starts with JD/JJD
-  const dhlMatch = clean.match(/\b(JD\d{18}|JJD\d{17}|\d{10})\b/i);
-  if (dhlMatch) return { carrier: 'dhl', trackingNumber: dhlMatch[1] };
-
   // UPS: 1Z...
   const upsMatch = clean.match(/\b(1Z[A-Z0-9]{16})\b/i);
   if (upsMatch) return { carrier: 'ups', trackingNumber: upsMatch[1] };
+
+  // DHL: 10-digit or starts with JD/JJD  
+  const dhlMatch = clean.match(/\b(JD\d{18}|JJD\d{17})\b/i);
+  if (dhlMatch) return { carrier: 'dhl', trackingNumber: dhlMatch[1] };
+
+  // Estafeta: 22 digits or starts with specific prefixes
+  const estafetaMatch = clean.match(/\b(\d{22})\b/);
+  if (estafetaMatch) return { carrier: 'estafeta', trackingNumber: estafetaMatch[1] };
+
+  // FedEx: 12-15 digits (most common)
+  const fedexMatch = clean.match(/\b(\d{12,15})\b/);
+  if (fedexMatch) return { carrier: 'fedex', trackingNumber: fedexMatch[1] };
+
+  // Generic long number (could be any carrier): 10-22 digits
+  const genericMatch = clean.match(/\b(\d{10,22})\b/);
+  if (genericMatch) return { carrier: 'unknown', trackingNumber: genericMatch[1] };
 
   return null;
 }
 
 /**
- * Track a FedEx package using their public tracking API.
+ * Generate tracking links for the detected carrier.
  */
-async function trackFedEx(trackingNumber) {
+function getTrackingLinks(trackingNumber, carrier) {
+  const links = {
+    fedex: {
+      name: 'FedEx',
+      url: `https://www.fedex.com/fedextrack/?trknbr=${trackingNumber}`,
+    },
+    ups: {
+      name: 'UPS',
+      url: `https://www.ups.com/track?tracknum=${trackingNumber}`,
+    },
+    dhl: {
+      name: 'DHL',
+      url: `https://www.dhl.com/mx-es/home/rastreo.html?tracking-id=${trackingNumber}`,
+    },
+    estafeta: {
+      name: 'Estafeta',
+      url: `https://rastreo3.estafeta.com/Tracking/searchByNumber/?guideNumber=${trackingNumber}`,
+    },
+    unknown: {
+      name: 'Paquetería',
+      url: `https://parcelsapp.com/en/tracking/${trackingNumber}`,
+    },
+  };
+
+  return links[carrier] || links.unknown;
+}
+
+/**
+ * Try to get tracking status via FedEx's internal API.
+ * Returns null if it fails (we'll fall back to link-only response).
+ */
+async function tryFedExAPI(trackingNumber) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    // Use FedEx's public tracking endpoint (no API key needed)
-    const res = await fetch('https://www.fedex.com/fedextrack/summary/json', {
+    // FedEx's internal tracking endpoint used by their website
+    const res = await fetch('https://www.fedex.com/trackingCal/track', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'es-MX,es;q=0.9',
+        'X-Requested-With': 'XMLHttpRequest',
       },
-      body: JSON.stringify({
-        TrackPackagesRequest: {
-          appType: 'WTRK',
-          uniqueKey: '',
-          processingParameters: {},
-          trackingInfoList: [{
-            trackNumberInfo: { trackingNumber, trackingQualifier: '', trackingCarrier: '' }
-          }]
-        }
+      body: new URLSearchParams({
+        data: JSON.stringify({
+          TrackPackagesRequest: {
+            appType: 'WTRK',
+            uniqueKey: '',
+            processingParameters: {},
+            trackingInfoList: [{
+              trackNumberInfo: {
+                trackingNumber,
+                trackingQualifier: '',
+                trackingCarrier: '',
+              }
+            }]
+          }
+        }),
+        action: 'trackpackages',
+        locale: 'es_MX',
+        version: '1',
+        format: 'json',
       }),
       signal: controller.signal,
     });
 
     clearTimeout(timeout);
 
-    if (!res.ok) {
-      // Fallback: try 17track API (free, no key)
-      return await trackVia17Track(trackingNumber);
-    }
+    if (!res.ok) return null;
 
-    const data = await res.json();
+    const text = await res.text();
+    // Check if it's actually JSON
+    if (text.startsWith('<') || text.startsWith('<!')) return null;
+
+    const data = JSON.parse(text);
     const pkg = data?.TrackPackagesResponse?.packageList?.[0];
 
-    if (!pkg || pkg.errorList?.length > 0) {
-      return await trackVia17Track(trackingNumber);
-    }
+    if (!pkg || pkg.errorList?.length > 0) return null;
 
     return {
-      carrier: 'FedEx',
-      trackingNumber,
-      status: pkg.keyStatus || 'Desconocido',
-      statusDetail: pkg.keyStatusCD || '',
-      lastUpdate: pkg.displayActDeliveryDt || pkg.displayEstDeliveryDt || '',
-      origin: pkg.originCity ? `${pkg.originCity}, ${pkg.originCntryCD}` : '',
-      destination: pkg.destCity ? `${pkg.destCity}, ${pkg.destCntryCD}` : '',
+      status: pkg.keyStatus || null,
+      statusDetail: pkg.keyStatusCD || null,
+      estimatedDelivery: pkg.displayEstDeliveryDt || null,
+      actualDelivery: pkg.displayActDeliveryDt || null,
+      origin: pkg.originCity ? `${pkg.originCity}, ${pkg.originCntryCD}` : null,
+      destination: pkg.destCity ? `${pkg.destCity}, ${pkg.destCntryCD}` : null,
       events: (pkg.scanEventList || []).slice(0, 5).map(e => ({
         date: e.date || '',
         time: e.time || '',
@@ -88,59 +132,8 @@ async function trackFedEx(trackingNumber) {
       })),
     };
   } catch (err) {
-    log.info('tracking_fedex_error', { trackingNumber, error: err.message });
-    return await trackVia17Track(trackingNumber);
-  }
-}
-
-/**
- * Fallback: use 17track's public page scraping
- */
-async function trackVia17Track(trackingNumber) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-    // Try Parcelsapp public API
-    const res = await fetch(`https://parcelsapp.com/api/v3/shipments/tracking`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        shipments: [{ trackingId: trackingNumber, language: 'es', country: 'Mexico' }],
-        language: 'es',
-      }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (!res.ok) {
-      return { carrier: 'Unknown', trackingNumber, status: 'No se pudo consultar el estado', events: [] };
-    }
-
-    const data = await res.json();
-    const shipment = data?.shipments?.[0];
-
-    if (shipment) {
-      return {
-        carrier: shipment.carrier || 'Unknown',
-        trackingNumber,
-        status: shipment.status || 'En transito',
-        lastUpdate: shipment.lastUpdate || '',
-        events: (shipment.events || []).slice(0, 5).map(e => ({
-          date: e.date || '',
-          location: e.location || '',
-          description: e.description || '',
-        })),
-      };
-    }
-
-    return { carrier: 'Unknown', trackingNumber, status: 'Sin informacion disponible', events: [] };
-  } catch (err) {
-    log.info('tracking_17track_error', { trackingNumber, error: err.message });
-    return { carrier: 'Unknown', trackingNumber, status: 'Error al consultar rastreo', events: [] };
+    log.info('tracking_fedex_api_error', { trackingNumber, error: err.message });
+    return null;
   }
 }
 
@@ -148,32 +141,39 @@ async function trackVia17Track(trackingNumber) {
  * Track a package. Returns formatted tracking info string for the AI.
  */
 export async function trackPackage(trackingNumber, carrier = 'fedex') {
-  let result;
-
-  switch (carrier) {
-    case 'fedex':
-      result = await trackFedEx(trackingNumber);
-      break;
-    default:
-      result = await trackVia17Track(trackingNumber);
+  const link = getTrackingLinks(trackingNumber, carrier);
+  
+  // Try to get real status data
+  let apiResult = null;
+  if (carrier === 'fedex') {
+    apiResult = await tryFedExAPI(trackingNumber);
   }
 
-  // Format for AI consumption
   let formatted = `RESULTADO DE RASTREO:\n`;
-  formatted += `Paqueteria: ${result.carrier}\n`;
-  formatted += `Numero: ${result.trackingNumber}\n`;
-  formatted += `Estado: ${result.status}\n`;
-  if (result.statusDetail) formatted += `Detalle: ${result.statusDetail}\n`;
-  if (result.lastUpdate) formatted += `Ultima actualizacion: ${result.lastUpdate}\n`;
-  if (result.origin) formatted += `Origen: ${result.origin}\n`;
-  if (result.destination) formatted += `Destino: ${result.destination}\n`;
+  formatted += `Paqueteria: ${link.name}\n`;
+  formatted += `Numero de guia: ${trackingNumber}\n`;
+  formatted += `Link de rastreo: ${link.url}\n`;
 
-  if (result.events && result.events.length > 0) {
-    formatted += `\nHistorial (ultimos ${result.events.length} movimientos):\n`;
-    for (const e of result.events) {
-      formatted += `- ${e.date || ''} ${e.time || ''} | ${e.location || ''} | ${e.description || ''}\n`;
+  if (apiResult && apiResult.status) {
+    formatted += `Estado: ${apiResult.status}\n`;
+    if (apiResult.statusDetail) formatted += `Detalle: ${apiResult.statusDetail}\n`;
+    if (apiResult.estimatedDelivery) formatted += `Entrega estimada: ${apiResult.estimatedDelivery}\n`;
+    if (apiResult.actualDelivery) formatted += `Entregado: ${apiResult.actualDelivery}\n`;
+    if (apiResult.origin) formatted += `Origen: ${apiResult.origin}\n`;
+    if (apiResult.destination) formatted += `Destino: ${apiResult.destination}\n`;
+
+    if (apiResult.events && apiResult.events.length > 0) {
+      formatted += `\nHistorial reciente:\n`;
+      for (const e of apiResult.events) {
+        formatted += `- ${e.date} ${e.time} | ${e.location} | ${e.description}\n`;
+      }
     }
+
+    formatted += `\nResponde con el estado del paquete. Incluye el link de rastreo para que el usuario pueda ver mas detalles.`;
+  } else {
+    formatted += `Estado: No se pudo consultar automaticamente.\n`;
+    formatted += `\nIMPORTANTE: No pudiste obtener el estado exacto por API. Responde al usuario con el LINK de rastreo para que pueda verlo directamente. Dile algo como "Aqui puedes ver el estado de tu paquete: [link]". NO digas que no encontraste informacion — dale el link directo.`;
   }
 
-  return { formatted, raw: result };
+  return { formatted, raw: apiResult };
 }
