@@ -245,7 +245,8 @@ export function validatePhone(phone) {
   if (!clean.startsWith('52')) return false;
 
   // Mexican numbers: 52 + 10 digits = 12 digits total
-  if (!/^52\d{10}$/.test(clean)) return false;
+  // Meta sometimes sends 521XXXXXXXXXX (13 digits) with legacy mobile prefix "1"
+  if (!/^52\d{10,11}$/.test(clean)) return false;
 
   // Block known test/spam patterns
   const spamPatterns = [
