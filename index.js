@@ -15,6 +15,7 @@ import { handlePaymentWebhook, handleCreatePayment, createPaymentLink } from './
 import { consumeCredits, checkLowBalance } from './credits.js';
 import { shouldUpdateProfile, extractUserProfile } from './memory.js';
 import { healthHandler, recordMessage } from './health.js';
+import { sanitizeInput, rateLimiter, filterOutput, validatePhone } from './security.js';
 import log from './logger.js';
 
 const app = express();
@@ -36,7 +37,7 @@ app.get('/payment/create', handleCreatePayment);
 app.get('/webhook', verifyWebhook);
 
 // Meta WhatsApp incoming messages (POST)
-app.post('/webhook', async (req, res) => {
+app.post('/webhook', rateLimiter, async (req, res) => {
   // Respond 200 OK immediately to avoid Meta retries
   res.sendStatus(200);
 
@@ -44,9 +45,16 @@ app.post('/webhook', async (req, res) => {
     const msg = parseMessage(req.body);
     if (!msg) return;
 
-    // Skip non-Mexican numbers (filter out WhatsApp system messages, random US numbers, etc.)
-    if (!msg.from.startsWith('52')) {
-      log.info('msg_skip_non_mx', { from: msg.from, reason: 'non-Mexican number' });
+    // Validate phone number (Mexican numbers only)
+    if (!validatePhone(msg.from)) {
+      log.info('msg_skip_invalid_phone', { from: msg.from, reason: 'failed phone validation' });
+      return;
+    }
+
+    // Check rate limiting (flag set by rateLimiter middleware)
+    if (req.rateLimited) {
+      await sendMessage(msg.from, 'Dale un respiro, estamos procesando tus mensajes anteriores.');
+      log.info('msg_rate_limited', { from: msg.from });
       return;
     }
 
@@ -89,11 +97,21 @@ app.post('/webhook', async (req, res) => {
       if (handled) return;
     }
 
+    // ── Sanitize input before AI processing ───────────────────────
+    const sanitized = sanitizeInput(msg.text);
+    const textForAI = sanitized.cleanText || msg.text;
+
     // ── Get conversation state and send to AI ──────────────────────
     const conversationState = getConversationState(msg.from);
 
+    const aiOptions = { conversationState };
+    if (sanitized.isInjectionAttempt) {
+      aiOptions.injectionWarning = true;
+      log.info('security_injection_attempt', { from: msg.from, patterns: sanitized.patterns });
+    }
+
     const startTime = Date.now();
-    const result = await chat(msg.from, msg.name, msg.text, { conversationState });
+    const result = await chat(msg.from, msg.name, textForAI, aiOptions);
     const durationMs = Date.now() - startTime;
 
     // Increment message count (still useful for analytics)
@@ -127,8 +145,13 @@ app.post('/webhook', async (req, res) => {
       processIntent(msg.from, intent);
     }
 
-    // Send the conversational response first
-    const finalResponse = cleanResponse || result.reply;
+    // Filter output before sending
+    const preFilterResponse = cleanResponse || result.reply;
+    const filtered = filterOutput(preFilterResponse);
+    if (filtered.wasFiltered) {
+      log.info('security_output_filtered', { to: msg.from, reason: filtered.reason });
+    }
+    const finalResponse = filtered.cleanText;
     log.info('msg_out', { to: msg.from, durationMs, model: result.model, action: result.actionType, text: finalResponse.slice(0, 100) });
     await sendMessage(msg.from, finalResponse);
 
