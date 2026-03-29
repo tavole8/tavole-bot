@@ -16,6 +16,7 @@ import { consumeCredits, checkLowBalance } from './credits.js';
 import { shouldUpdateProfile, extractUserProfile } from './memory.js';
 import { healthHandler, recordMessage } from './health.js';
 import { sanitizeInput, rateLimiter, filterOutput, validatePhone } from './security.js';
+import { detectTracking } from './tracking.js';
 import log from './logger.js';
 
 const app = express();
@@ -37,6 +38,34 @@ app.get('/payment/create', handleCreatePayment);
 app.get('/webhook', verifyWebhook);
 
 // Meta WhatsApp incoming messages (POST)
+/**
+ * Detect if a message will need processing time (search, tracking, complex task).
+ */
+function detectNeedsProcessing(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  
+  // Tracking numbers
+  if (detectTracking(text)) return true;
+  
+  // Questions that likely need web search
+  const searchPatterns = [
+    /rastr(ea|o|ear)/i,        // tracking
+    /paquete|envio|guia/i,      // package
+    /hor(ario|a)s? de/i,        // hours of
+    /precio|cuesta|costo/i,     // price
+    /donde queda|direccion/i,   // where is / address
+    /clima|temperatura/i,       // weather
+    /resultado|score/i,         // results
+    /vuelo|avion/i,             // flights
+    /fedex|dhl|ups|estafeta/i,  // carriers
+    /busca|investiga|averigua/i, // research requests
+    /necesito que|hazme|puedes hacer/i, // task requests
+  ];
+  
+  return searchPatterns.some(p => p.test(lower));
+}
+
 app.post('/webhook', rateLimiter, async (req, res) => {
   // Respond 200 OK immediately to avoid Meta retries
   res.sendStatus(200);
@@ -108,6 +137,20 @@ app.post('/webhook', rateLimiter, async (req, res) => {
     if (sanitized.isInjectionAttempt) {
       aiOptions.injectionWarning = true;
       log.info('security_injection_attempt', { from: msg.from, patterns: sanitized.patterns });
+    }
+
+    // ── Send quick acknowledgment for tasks that need processing time ──
+    const needsProcessing = detectNeedsProcessing(textForAI);
+    if (needsProcessing) {
+      const acks = [
+        'Dame un momento, lo estoy checando...',
+        'Deja lo busco...',
+        'Un segundo, estoy en eso...',
+        'Ya lo estoy buscando...',
+        'Dejame revisar...',
+      ];
+      const ack = acks[Math.floor(Math.random() * acks.length)];
+      sendMessage(msg.from, ack).catch(() => {}); // fire and forget
     }
 
     const startTime = Date.now();
