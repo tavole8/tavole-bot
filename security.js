@@ -192,13 +192,18 @@ export function rateLimiter(req, res, next) {
 /**
  * Filter AI output before sending to the user.
  * Detects system prompt leaks and exposed secrets.
+ * Note: [SEARCH:] tags are internal and should be stripped before reaching this filter,
+ * but we whitelist them here as a safety net so they don't trigger false positives.
  */
 export function filterOutput(text) {
   if (!text || typeof text !== 'string') {
     return { cleanText: '', wasFiltered: false, reason: null };
   }
 
-  const upper = text.toUpperCase();
+  // Strip any [SEARCH:] tags that might have leaked through
+  let cleanedText = text.replace(/\[SEARCH:\s*.+?\]/gi, '').trim();
+
+  const upper = cleanedText.toUpperCase();
 
   // Check for system prompt phrases
   for (const phrase of SYSTEM_PROMPT_PHRASES) {
@@ -214,7 +219,7 @@ export function filterOutput(text) {
 
   // Check for secrets/keys
   for (const pattern of SECRET_PATTERNS) {
-    if (pattern.test(text)) {
+    if (pattern.test(cleanedText)) {
       log.info('security_output_filtered', { reason: 'secret_detected', pattern: pattern.source });
       return {
         cleanText: 'Hmm, algo salio mal. Intentalo de nuevo.',
@@ -224,7 +229,7 @@ export function filterOutput(text) {
     }
   }
 
-  return { cleanText: text, wasFiltered: false, reason: null };
+  return { cleanText: cleanedText, wasFiltered: false, reason: null };
 }
 
 /**

@@ -3,6 +3,8 @@ import { getHistory, saveMessage, getOrCreateUser, updateUserName } from './db.j
 import { findRelevantSkills, formatSkillContext } from './skills.js';
 import { buildMemoryContext } from './memory.js';
 import { getBalance, formatBalanceSummary, formatCreditPackages, formatTransactionHistory } from './credits.js';
+import { searchWeb } from './web-search.js';
+import log from './logger.js';
 
 // Models
 const MODEL_HAIKU = 'anthropic/claude-3-5-haiku';
@@ -26,11 +28,15 @@ REGLAS ABSOLUTAS (romper cualquiera de estas es un error critico):
 
 Eres Tavole. Una persona, no un bot. Alguien de unos 30-y-tantos que sabe de todo un poco y está disponible 24/7 en WhatsApp. Tu trabajo es HACER las cosas por la gente, no decirles como hacerlas. Si quieren una pagina web, TU la haces. No les mandas a otro lado ni les das instrucciones para que lo hagan solos. Eres un concierge, resuelves.
 
-IMPORTANTE SOBRE TUS LIMITACIONES ACTUALES:
-- NO tienes acceso a internet, APIs externas, ni bases de datos en tiempo real.
-- NO puedes rastrear paquetes (FedEx, DHL, etc), buscar en Google, consultar precios, ni verificar informacion en linea.
-- Si alguien pide algo que requiere acceso a internet o datos en tiempo real, se HONESTO: "Ahorita no tengo forma de consultar eso directamente. Dame el dato y cuando tenga acceso te lo resuelvo." o "Eso requiere consultar el sitio de FedEx, que ahorita no puedo hacer. Te recomiendo checarlo en fedex.com con tu numero de guia."
-- NUNCA, JAMAS inventes datos. No inventes ubicaciones, estados de paquetes, precios, horarios, ni ningun dato que no tengas confirmado. Inventar informacion es la peor falla posible. Es mejor decir "no se" que inventar.
+BUSQUEDA WEB:
+Tienes acceso a buscar en internet. Cuando el usuario pida informacion que requiere datos actuales o verificables (precios, horarios, clima, noticias, rastreo de paquetes, resultados deportivos, etc), DEBES buscar en internet.
+
+Cuando necesites buscar, responde EXACTAMENTE con este formato en tu primera linea:
+[SEARCH: tu query de busqueda aqui]
+
+Solo usa [SEARCH:] cuando REALMENTE necesitas datos de internet. Para conversacion normal, opiniones, o cosas que sabes, responde directamente.
+
+- NUNCA, JAMAS inventes datos. Busca en internet si necesitas datos reales, nunca inventes. Inventar informacion es la peor falla posible. Es mejor decir "no se" o buscar que inventar.
 
 PERSONALIDAD:
 - Directo y claro. Inteligente pero no pretencioso.
@@ -353,10 +359,55 @@ export async function chat(userPhone, userName, userMessage, options = {}) {
   const estimatedCost = model === MODEL_SONNET ? COST_SONNET : COST_HAIKU;
   const maxTokens = useAdvanced ? 4096 : 256;
 
-  const result = await callAI(model, systemPrompt, messages, maxTokens);
+  let result = await callAI(model, systemPrompt, messages, maxTokens);
+  let totalInputTokens = result.inputTokens;
+  let totalOutputTokens = result.outputTokens;
+
+  // Check if AI wants to search the web
+  const searchMatch = result.text.match(/^\[SEARCH:\s*(.+?)\]\s*/i);
+  if (searchMatch) {
+    const searchQuery = searchMatch[1].trim();
+    log.info('web_search_triggered', { phone: userPhone, query: searchQuery });
+
+    const searchResults = await searchWeb(searchQuery);
+
+    if (searchResults.results.length > 0) {
+      const formattedResults = searchResults.results
+        .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`)
+        .join('\n\n');
+
+      // Call AI again with search results
+      const searchContext = `Resultados de busqueda para "${searchQuery}":\n${formattedResults}\n\nUsa estos resultados para responder al usuario. Se conciso, extrae solo lo relevante. Si los resultados no tienen la respuesta, dilo honestamente.`;
+
+      messages.push({ role: 'assistant', content: result.text });
+      messages.push({ role: 'user', content: searchContext });
+
+      result = await callAI(model, systemPrompt, messages, maxTokens);
+      totalInputTokens += result.inputTokens;
+      totalOutputTokens += result.outputTokens;
+
+      // Remove the search context messages from history (don't save internal messages)
+      messages.pop();
+      messages.pop();
+    } else {
+      // Search failed, let AI know
+      messages.push({ role: 'assistant', content: result.text });
+      messages.push({ role: 'user', content: 'La busqueda web no devolvio resultados. Responde honestamente que no pudiste encontrar esa informacion ahorita.' });
+
+      result = await callAI(model, systemPrompt, messages, maxTokens);
+      totalInputTokens += result.inputTokens;
+      totalOutputTokens += result.outputTokens;
+
+      messages.pop();
+      messages.pop();
+    }
+  }
+
+  // Strip any remaining [SEARCH:] tags that might leak
+  let responseText = result.text.replace(/^\[SEARCH:\s*.+?\]\s*/i, '').trim();
 
   // Parse action type classification
-  const { cleanResponse: noActionResponse, actionType, credits, actionDescription } = parseActionType(result.text);
+  const { cleanResponse: noActionResponse, actionType, credits, actionDescription } = parseActionType(responseText);
 
   saveMessage(userPhone, 'assistant', noActionResponse);
 
@@ -364,9 +415,9 @@ export async function chat(userPhone, userName, userMessage, options = {}) {
     reply: noActionResponse,
     model,
     estimatedCost,
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-    totalTokens: result.inputTokens + result.outputTokens,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens,
     actionType,
     actionCredits: credits,
     actionDescription,
