@@ -5,10 +5,12 @@ import { mkdirSync } from 'fs';
 import config from './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, 'data', 'conversations.db');
 
-// Ensure data directory exists (Railway has ephemeral filesystem)
-mkdirSync(join(__dirname, 'data'), { recursive: true });
+// Use /tmp on Railway (writable), local data/ dir otherwise
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
+const dataDir = isRailway ? '/tmp/tavole-data' : join(__dirname, 'data');
+mkdirSync(dataDir, { recursive: true });
+const DB_PATH = join(dataDir, 'conversations.db');
 
 const db = new Database(DB_PATH);
 
