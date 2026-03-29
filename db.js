@@ -11,6 +11,7 @@ const isRailway = !!process.env.RAILWAY_ENVIRONMENT;
 const dataDir = isRailway ? '/tmp/tavole-data' : join(__dirname, 'data');
 mkdirSync(dataDir, { recursive: true });
 const DB_PATH = join(dataDir, 'conversations.db');
+console.log('[DB] Railway env:', !!process.env.RAILWAY_ENVIRONMENT, '| Data dir:', dataDir, '| DB path:', DB_PATH);
 
 const db = new Database(DB_PATH);
 
